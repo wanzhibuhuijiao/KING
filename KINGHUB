@@ -1,0 +1,893 @@
+-- ==========================================
+-- 👑 KING HUB v3.0 - 完整脚本
+-- 作者QQ: 3370747275
+-- 功能：卡密验证 | 启动动画 | 中央主UI | 左下角K按钮 | 全UI拖动 | -- ==========================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+-- ========== 配置区 ==========
+local VALID_KEYS = {"KING2026", "king2026"}
+local AUTHOR_QQ = "3370747275"
+local SCRIPT_VERSION = "v3.0"
+
+-- ========== 全局状态 ==========
+local espEnabled = false
+local aimAssistEnabled = false
+local flyEnabled = false
+local flySpeed = 50
+local infJumpEnabled = false
+local jumpPower = 100
+local walkSpeedValue = 16
+
+local xrayEnabled = false
+local fogDisabled = false
+local brightnessValue = 2
+local grayscaleEnabled = false
+
+local originalFogEnd = Lighting.FogEnd
+local originalBrightness = Lighting.Brightness
+local savedTransparencies = {}
+local savedColors = {}
+
+local espMarkers = {}
+local aimThread = nil
+local flyThread = nil
+local infJumpThread = nil
+
+-- ========== GUI 根节点 ==========
+local gui = Instance.new("ScreenGui")
+gui.Name = "KingHubGUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = game:GetService("CoreGui")
+
+-- ========== 工具函数 ==========
+local function verifyKey(key)
+    for _, v in ipairs(VALID_KEYS) do
+        if key == v then return true end
+    end
+    return false
+end
+
+local function safeDestroy(obj)
+    if obj and obj.Parent then obj:Destroy() end
+end
+
+local function clampToScreen(frame, padding)
+    padding = padding or 0
+    local vp = workspace.CurrentCamera.ViewportSize
+    local pos = frame.Position
+    local size = frame.Size
+    
+    local minX = padding
+    local minY = padding
+    local maxX = vp.X - size.Width.Value - padding
+    local maxY = vp.Y - size.Height.Value - padding
+    
+    local newX = math.clamp(pos.X.Value, minX, maxX)
+    local newY = math.clamp(pos.Y.Value, minY, maxY)
+    
+    frame.Position = UDim2.new(0, newX, 0, newY)
+end
+
+-- ========== 拖动系统 ==========
+local function makeDraggable(frame, handle)
+    handle = handle or frame
+    local dragging = false
+    local dragStart, startPos
+    
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragStart = input.Position
+            startPos = frame.Position
+            -- 延迟判断是否为拖动（>0.3秒才算拖动）
+            local holdTime = 0
+            local holdConn
+            holdConn = RunService.RenderStepped:Connect(function(dt)
+                holdTime = holdTime + dt
+                if holdTime >= 0.3 then
+                    dragging = true
+                    holdConn:Disconnect()
+                end
+            end)
+            
+            local endedConn
+            endedConn = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    holdConn:Disconnect()
+                    endedConn:Disconnect()
+                end
+            end)
+        end
+    end)
+    
+    handle.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement 
+           or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+            clampToScreen(frame, 0)
+        end
+    end)
+end
+
+-- ========== 创建 UI 辅助 ==========
+local function createFrame(parent, size, position, color, transparency, cornerRadius)
+    local f = Instance.new("Frame")
+    f.Size = size
+    f.Position = position or UDim2.new(0,0,0,0)
+    f.BackgroundColor3 = color or Color3.fromRGB(40,40,50)
+    f.BackgroundTransparency = transparency or 0
+    f.BorderSizePixel = 0
+    f.Parent = parent
+    if cornerRadius then
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, cornerRadius)
+        c.Parent = f
+    end
+    return f
+end
+
+local function createLabel(parent, text, size, position, fontSize, font, color, align)
+    local l = Instance.new("TextLabel")
+    l.Text = text
+    l.Size = size or UDim2.new(1,0,0,30)
+    l.Position = position or UDim2.new(0,0,0,0)
+    l.Font = font or Enum.Font.Gotham
+    l.TextSize = fontSize or 16
+    l.TextColor3 = color or Color3.white
+    l.BackgroundTransparency = 1
+    l.TextXAlignment = align or Enum.TextXAlignment.Left
+    l.Parent = parent
+    return l
+end
+
+local function createButton(parent, text, size, position, bgColor, textColor)
+    local b = Instance.new("TextButton")
+    b.Text = text
+    b.Size = size or UDim2.new(1,-20,0,44)
+    b.Position = position or UDim2.new(0,10,0,0)
+    b.BackgroundColor3 = bgColor or Color3.fromRGB(55,55,70)
+    b.TextColor3 = textColor or Color3.white
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 16
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = true
+    b.Parent = parent
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0,8)
+    c.Parent = b
+    return b
+end
+
+-- ========== 卡密验证面板 ==========
+local authPanel = createFrame(gui, UDim2.new(0,280,0,140), UDim2.new(0.5,-140,0.5,-70), Color3.fromRGB(30,30,40), 0, 12)
+authPanel.ZIndex = 500
+
+createLabel(authPanel, "🔐 KING HUB - 卡密验证", UDim2.new(1,0,0,30), UDim2.new(0,0,0,8), 18, Enum.Font.GothamBold, Color3.fromRGB(255,215,0), Enum.TextXAlignment.Center)
+
+local keyBox = Instance.new("TextBox")
+keyBox.PlaceholderText = "请输入卡密"
+keyBox.Size = UDim2.new(1,-40,0,36)
+keyBox.Position = UDim2.new(0,20,0,45)
+keyBox.BackgroundColor3 = Color3.fromRGB(255,255,255)
+keyBox.TextColor3 = Color3.fromRGB(30,30,30)
+keyBox.Font = Enum.Font.Gotham
+keyBox.TextSize = 16
+keyBox.ClearTextOnFocus = true
+keyBox.BorderSizePixel = 0
+keyBox.Parent = authPanel
+local kc = Instance.new("UICorner")
+kc.CornerRadius = UDim.new(0,6)
+kc.Parent = keyBox
+
+local verifyBtn = createButton(authPanel, "✅ 验证", UDim2.new(1,-40,0,36), UDim2.new(0,20,0,90), Color3.fromRGB(40,180,80), Color3.white)
+
+local function doVerify()
+    if verifyKey(keyBox.Text) then
+        warn("KING: 卡密验证成功！欢迎使用 KING HUB " .. SCRIPT_VERSION)
+        safeDestroy(authPanel)
+        playIntroAnimation()
+    else
+        keyBox.BackgroundColor3 = Color3.fromRGB(255,80,80)
+        keyBox.PlaceholderText = "卡密错误！"
+        keyBox.Text = ""
+        warn("KING: 卡密错误！脚本将在3秒后自毁...")
+        wait(3)
+        safeDestroy(gui)
+    end
+end
+
+verifyBtn.MouseButton1Click:Connect(doVerify)
+keyBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then doVerify() end
+end)
+
+-- ========== 启动动画 ==========
+function playIntroAnimation()
+    local overlay = createFrame(gui, UDim2.new(1,0,1,0), UDim2.new(0,0,0,0), Color3.fromRGB(0,0,0), 0, 0)
+    overlay.ZIndex = 900
+    
+    createLabel(overlay, "KING HUB", UDim2.new(1,0,0,60), UDim2.new(0,0,0.4,-30), 60, Enum.Font.GothamBlack, Color3.white, Enum.TextXAlignment.Center)
+    createLabel(overlay, "这款脚本，稳定安全强大，简约流畅", UDim2.new(1,0,0,30), UDim2.new(0,0,0.5,10), 20, Enum.Font.Gotham, Color3.white, Enum.TextXAlignment.Center)
+    
+    wait(2)
+    
+    local fadeOut = TweenService:Create(overlay, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 1})
+    fadeOut:Play()
+    fadeOut.Completed:Wait()
+    safeDestroy(overlay)
+    
+    loadMainUI()
+end
+
+-- ========== 主 UI 加载 ==========
+function loadMainUI()
+    -- 主面板（屏幕正中央，大尺寸）
+    local mainPanel = createFrame(gui, UDim2.new(0,240,0,400), UDim2.new(0.5,-120,0.5,-200), Color3.fromRGB(40,40,50), 0, 12)
+    mainPanel.ZIndex = 100
+    mainPanel.Visible = false
+    
+    -- 标题栏
+    createLabel(mainPanel, "👑 KING HUB", UDim2.new(1,0,0,36), UDim2.new(0,0,0,0), 18, Enum.Font.GothamBlack, Color3.fromRGB(255,215,0), Enum.TextXAlignment.Center)
+    
+    -- 滚动容器
+    local scrollFrame = Instance.new("ScrollingFrame")
+    scrollFrame.Size = UDim2.new(1,0,1,-36)
+    scrollFrame.Position = UDim2.new(0,0,0,36)
+    scrollFrame.BackgroundTransparency = 1
+    scrollFrame.ScrollBarThickness = 4
+    scrollFrame.CanvasSize = UDim2.new(0,0,0,0)
+    scrollFrame.Parent = mainPanel
+    
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Padding = UDim.new(0,4)
+    listLayout.Parent = scrollFrame
+    
+    -- 动态调整画布大小
+    listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scrollFrame.CanvasSize = UDim2.new(0,0,0,listLayout.AbsoluteContentSize.Y + 10)
+    end)
+    
+    -- ===== 功能按钮 =====
+    local order = 0
+    
+    -- 1. 公告
+    local noticeBtn = createButton(scrollFrame, "ℹ️ 公告", UDim2.new(1,-20,0,44), nil, Color3.fromRGB(55,55,70))
+    noticeBtn.LayoutOrder = order; order = order + 1
+    noticeBtn.MouseButton1Click:Connect(function()
+        warn("========================================")
+        warn("👑 KING HUB " .. SCRIPT_VERSION .. " 官方公告")
+        warn("作者QQ: " .. AUTHOR_QQ)
+        warn("这款脚本简约流畅，安全稳定！")
+        warn("【简约】界面设计干净无广告，UI布局清晰直观；")
+        warn("【流畅】底层采用协程与TweenService优化，动画丝滑不卡顿；")
+        warn("【安全】纯本地逻辑运行无网络请求，高危操作强制警告提示；")
+        warn("【稳定】自带内存自动清理机制，防崩溃防泄漏，兼容主流游戏！")
+        warn("========================================")
+    end)
+    
+    -- 2. 透视
+    local espBtn = createButton(scrollFrame, "👁️ 透视 [关闭]", UDim2.new(1,-20,0,44), nil, Color3.fromRGB(55,55,70))
+    espBtn.LayoutOrder = order; order = order + 1
+    espBtn.MouseButton1Click:Connect(function()
+        espEnabled = not espEnabled
+        espBtn.Text = espEnabled and "👁️ 透视 [开启]" or "👁️ 透视 [关闭]"
+        espBtn.BackgroundColor3 = espEnabled and Color3.fromRGB(40,180,80) or Color3.fromRGB(55,55,70)
+        if not espEnabled then
+            for _, m in pairs(espMarkers) do safeDestroy(m) end
+            espMarkers = {}
+        end
+    end)
+    
+    -- 3. 自瞄
+    local aimBtn = createButton(scrollFrame, "🎯 自瞄 [关闭]", UDim2.new(1,-20,0,44), nil, Color3.fromRGB(55,55,70))
+    aimBtn.LayoutOrder = order; order = order + 1
+    aimBtn.MouseButton1Click:Connect(function()
+        aimAssistEnabled = not aimAssistEnabled
+        aimBtn.Text = aimAssistEnabled and "🎯 自瞄 [开启]" or "🎯 自瞄 [关闭]"
+        aimBtn.BackgroundColor3 = aimAssistEnabled and Color3.fromRGB(40,180,80) or Color3.fromRGB(55,55,70)
+    end)
+    
+    -- 4. 角色
+    local charBtn = createButton(scrollFrame, "👤 角色", UDim2.new(1,-20,0,44), nil, Color3.fromRGB(55,55,70))
+    charBtn.LayoutOrder = order; order = order + 1
+    
+    -- 角色子面板内容容器
+    local charSubContainer = Instance.new("Frame")
+    charSubContainer.Size = UDim2.new(1,-20,0,0)
+    charSubContainer.BackgroundTransparency = 1
+    charSubContainer.ClipsDescendants = true
+    charSubContainer.LayoutOrder = order; order = order + 1
+    charSubContainer.Parent = scrollFrame
+    
+    local charSubList = Instance.new("UIListLayout")
+    charSubList.SortOrder = Enum.SortOrder.LayoutOrder
+    charSubList.Padding = UDim.new(0,4)
+    charSubList.Parent = charSubContainer
+    
+    local charOpen = false
+    charBtn.MouseButton1Click:Connect(function()
+        charOpen = not charOpen
+        TweenService:Create(charSubContainer, TweenInfo.new(0.2), {Size = UDim2.new(1,-20,0, charOpen and 220 or 0)}):Play()
+    end)
+    
+    -- 返回按钮
+    local charBackBtn = createButton(charSubContainer, "← 返回", UDim2.new(1,0,0,36), nil, Color3.fromRGB(80,80,100))
+    charBackBtn.LayoutOrder = 1
+    charBackBtn.MouseButton1Click:Connect(function()
+        charOpen = false
+        TweenService:Create(charSubContainer, TweenInfo.new(0.2), {Size = UDim2.new(1,-20,0,0)}):Play()
+    end)
+    
+    -- 移速
+    local speedLabel = createLabel(charSubContainer, "🏃 移速:", UDim2.new(1,0,0,24), nil, 14, Enum.Font.GothamBold, Color3.fromRGB(200,200,220))
+    speedLabel.LayoutOrder = 2
+    local speedBox = Instance.new("TextBox")
+    speedBox.Text = "16"
+    speedBox.Size = UDim2.new(1,0,0,32)
+    speedBox.BackgroundColor3 = Color3.fromRGB(60,60,80)
+    speedBox.TextColor3 = Color3.white
+    speedBox.Font = Enum.Font.Gotham
+    speedBox.TextSize = 14
+    speedBox.ClearTextOnFocus = false
+    speedBox.BorderSizePixel = 0
+    speedBox.LayoutOrder = 3
+    speedBox.Parent = charSubContainer
+    Instance.new("UICorner", speedBox).CornerRadius = UDim.new(0,6)
+    speedBox.FocusLost:Connect(function()
+        local v = tonumber(speedBox.Text)
+        if v and v >= 16 and v <= 100 then
+            walkSpeedValue = v
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.WalkSpeed = v end
+            end
+        end
+    end)
+    
+    -- 飞行开关
+    local flyBtn = createButton(charSubContainer, "✈️ 飞行 [关闭]", UDim2.new(1,0,0,36), nil, Color3.fromRGB(55,55,70))
+    flyBtn.LayoutOrder = 4
+    flyBtn.MouseButton1Click:Connect(function()
+        flyEnabled = not flyEnabled
+        flyBtn.Text = flyEnabled and "✈️ 飞行 [开启]" or "✈️ 飞行 [关闭]"
+        flyBtn.BackgroundColor3 = flyEnabled and Color3.fromRGB(40,180,80) or Color3.fromRGB(55,55,70)
+        if flyEnabled then
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = true end
+            end
+        else
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = false end
+            end
+        end
+    end)
+    
+    -- 上升/下降按钮（手机友好，无键盘依赖）
+    local upBtn = createButton(charSubContainer, "⬆️ 上升（按住）", UDim2.new(1,0,0,32), nil, Color3.fromRGB(40,160,80))
+    upBtn.LayoutOrder = 5
+    upBtn.Visible = false
+    
+    local downBtn = createButton(charSubContainer, "⬇️ 下降（按住）", UDim2.new(1,0,0,32), nil, Color3.fromRGB(180,40,40))
+    downBtn.LayoutOrder = 6
+    downBtn.Visible = false
+    
+    -- 显示/隐藏升降按钮
+    flyBtn:GetPropertyChangedSignal("Text"):Connect(function()
+        local show = flyBtn.Text:find("开启") ~= nil
+        upBtn.Visible = show
+        downBtn.Visible = show
+    end)
+    
+    -- 上升控制
+    local rising = false
+    upBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            rising = true
+        end
+    end)
+    upBtn.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            rising = false
+        end
+    end)
+    
+    -- 下降控制
+    local descending = false
+    downBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            descending = true
+        end
+    end)
+    downBtn.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            descending = false
+        end
+    end)
+    
+    -- 飞行速度输入
+    local flySpeedLabel = createLabel(charSubContainer, "✈️ 飞行速度:", UDim2.new(1,0,0,24), nil, 14, Enum.Font.GothamBold, Color3.fromRGB(200,200,220))
+    flySpeedLabel.LayoutOrder = 7
+    local flySpeedBox = Instance.new("TextBox")
+    flySpeedBox.Text = "50"
+    flySpeedBox.Size = UDim2.new(1,0,0,32)
+    flySpeedBox.BackgroundColor3 = Color3.fromRGB(60,60,80)
+    flySpeedBox.TextColor3 = Color3.white
+    flySpeedBox.Font = Enum.Font.Gotham
+    flySpeedBox.TextSize = 14
+    flySpeedBox.ClearTextOnFocus = false
+    flySpeedBox.BorderSizePixel = 0
+    flySpeedBox.LayoutOrder = 8
+    flySpeedBox.Parent = charSubContainer
+    Instance.new("UICorner", flySpeedBox).CornerRadius = UDim.new(0,6)
+    flySpeedBox.FocusLost:Connect(function()
+        local v = tonumber(flySpeedBox.Text)
+        if v and v >= 20 and v <= 200 then flySpeed = v end
+    end)
+    
+    -- 无限跳
+    local infJumpBtn = createButton(charSubContainer, "🦘 无限跳 [关闭]", UDim2.new(1,0,0,36), nil, Color3.fromRGB(55,55,70))
+    infJumpBtn.LayoutOrder = 9
+    infJumpBtn.MouseButton1Click:Connect(function()
+        infJumpEnabled = not infJumpEnabled
+        infJumpBtn.Text = infJumpEnabled and "🦘 无限跳 [开启]" or "🦘 无限跳 [关闭]"
+        infJumpBtn.BackgroundColor3 = infJumpEnabled and Color3.fromRGB(40,180,80) or Color3.fromRGB(55,55,70)
+    end)
+    
+    -- 跳跃高度
+    local jumpLabel = createLabel(charSubContainer, "🦘 跳跃高度:", UDim2.new(1,0,0,24), nil, 14, Enum.Font.GothamBold, Color3.fromRGB(200,200,220))
+    jumpLabel.LayoutOrder = 10
+    local jumpBox = Instance.new("TextBox")
+    jumpBox.Text = "100"
+    jumpBox.Size = UDim2.new(1,0,0,32)
+    jumpBox.BackgroundColor3 = Color3.fromRGB(60,60,80)
+    jumpBox.TextColor3 = Color3.white
+    jumpBox.Font = Enum.Font.Gotham
+    jumpBox.TextSize = 14
+    jumpBox.ClearTextOnFocus = false
+    jumpBox.BorderSizePixel = 0
+    jumpBox.LayoutOrder = 11
+    jumpBox.Parent = charSubContainer
+    Instance.new("UICorner", jumpBox).CornerRadius = UDim.new(0,6)
+    jumpBox.FocusLost:Connect(function()
+        local v = tonumber(jumpBox.Text)
+        if v and v >= 50 and v <= 300 then jumpPower = v end
+    end)
+    
+    -- 5. 环境
+    local envBtn = createButton(scrollFrame, "🌌 环境", UDim2.new(1,-20,0,44), nil, Color3.fromRGB(55,55,70))
+    envBtn.LayoutOrder = order; order = order + 1
+    
+    local envSubContainer = Instance.new("Frame")
+    envSubContainer.Size = UDim2.new(1,-20,0,0)
+    envSubContainer.BackgroundTransparency = 1
+    envSubContainer.ClipsDescendants = true
+    envSubContainer.LayoutOrder = order; order = order + 1
+    envSubContainer.Parent = scrollFrame
+    
+    local envSubList = Instance.new("UIListLayout")
+    envSubList.SortOrder = Enum.SortOrder.LayoutOrder
+    envSubList.Padding = UDim.new(0,4)
+    envSubList.Parent = envSubContainer
+    
+    local envOpen = false
+    envBtn.MouseButton1Click:Connect(function()
+        envOpen = not envOpen
+        TweenService:Create(envSubContainer, TweenInfo.new(0.2), {Size = UDim2.new(1,-20,0, envOpen and 260 or 0)}):Play()
+    end)
+    
+    local envBackBtn = createButton(envSubContainer, "← 返回", UDim2.new(1,0,0,36), nil, Color3.fromRGB(80,80,100))
+    envBackBtn.LayoutOrder = 1
+    envBackBtn.MouseButton1Click:Connect(function()
+        envOpen = false
+        TweenService:Create(envSubContainer, TweenInfo.new(0.2), {Size = UDim2.new(1,-20,0,0)}):Play()
+    end)
+    
+    -- X-Ray
+    local xrayBtn = createButton(envSubContainer, "👁️ X-Ray [关闭]", UDim2.new(1,0,0,36), nil, Color3.fromRGB(55,55,70))
+    xrayBtn.LayoutOrder = 2
+    xrayBtn.MouseButton1Click:Connect(function()
+        xrayEnabled = not xrayEnabled
+        xrayBtn.Text = xrayEnabled and "👁️ X-Ray [开启]" or "👁️ X-Ray [关闭]"
+        xrayBtn.BackgroundColor3 = xrayEnabled and Color3.fromRGB(40,180,80) or Color3.fromRGB(55,55,70)
+        if xrayEnabled then
+            for _, obj in pairs(workspace:GetDescendants()) do
+                if obj:IsA("BasePart") and not obj:IsDescendantOf(LocalPlayer.Character) then
+                    savedTransparencies[obj] = obj.Transparency
+                    obj.Transparency = 0.85
+                end
+            end
+        else
+            for obj, t in pairs(savedTransparencies) do
+                if obj and obj.Parent then obj.Transparency = t end
+            end
+            savedTransparencies = {}
+        end
+    end)
+    
+    -- 雾气
+    local fogBtn = createButton(envSubContainer, "🌫️ 雾气 [开启]", UDim2.new(1,0,0,36), nil, Color3.fromRGB(55,55,70))
+    fogBtn.LayoutOrder = 3
+    fogBtn.MouseButton1Click:Connect(function()
+        fogDisabled = not fogDisabled
+        fogBtn.Text = fogDisabled and "🌫️ 雾气 [关闭]" or "🌫️ 雾气 [开启]"
+        fogBtn.BackgroundColor3 = fogDisabled and Color3.fromRGB(40,180,80) or Color3.fromRGB(55,55,70)
+        Lighting.FogEnd = fogDisabled and 1e6 or originalFogEnd
+    end)
+    
+    -- 亮度
+    local brightLabel = createLabel(envSubContainer, "🔆 亮度:", UDim2.new(1,0,0,24), nil, 14, Enum.Font.GothamBold, Color3.fromRGB(200,200,220))
+    brightLabel.LayoutOrder = 4
+    local brightBox = Instance.new("TextBox")
+    brightBox.Text = "2"
+    brightBox.Size = UDim2.new(1,0,0,32)
+    brightBox.BackgroundColor3 = Color3.fromRGB(60,60,80)
+    brightBox.TextColor3 = Color3.white
+    brightBox.Font = Enum.Font.Gotham
+    brightBox.TextSize = 14
+    brightBox.ClearTextOnFocus = false
+    brightBox.BorderSizePixel = 0
+    brightBox.LayoutOrder = 5
+    brightBox.Parent = envSubContainer
+    Instance.new("UICorner", brightBox).CornerRadius = UDim.new(0,6)
+    brightBox.FocusLost:Connect(function()
+        local v = tonumber(brightBox.Text)
+        if v and v >= 0.5 and v <= 5 then
+            brightnessValue = v
+            Lighting.Brightness = v
+        end
+    end)
+    
+    -- 灰度
+    local grayBtn = createButton(envSubContainer, "🖤 灰度 [关闭]", UDim2.new(1,0,0,36), nil, Color3.fromRGB(55,55,70))
+    grayBtn.LayoutOrder = 6
+    grayBtn.MouseButton1Click:Connect(function()
+        grayscaleEnabled = not grayscaleEnabled
+        grayBtn.Text = grayscaleEnabled and "🖤 灰度 [开启]" or "🖤 灰度 [关闭]"
+        grayBtn.BackgroundColor3 = grayscaleEnabled and Color3.fromRGB(40,180,80) or Color3.fromRGB(55,55,70)
+        if grayscaleEnabled then
+            for _, obj in pairs(workspace:GetDescendants()) do
+                if obj:IsA("BasePart") and not obj:IsDescendantOf(LocalPlayer.Character) then
+                    savedColors[obj] = obj.Color
+                    obj.Color = Color3.fromRGB(128,128,128)
+                end
+            end
+        else
+            for obj, c in pairs(savedColors) do
+                if obj and obj.Parent then obj.Color = c end
+            end
+            savedColors = {}
+        end
+    end)
+    
+    -- 重置环境
+    local resetEnvBtn = createButton(envSubContainer, "🔄 重置环境", UDim2.new(1,0,0,36), nil, Color3.fromRGB(180,80,40))
+    resetEnvBtn.LayoutOrder = 7
+    resetEnvBtn.MouseButton1Click:Connect(function()
+        -- X-Ray
+        if xrayEnabled then
+            xrayEnabled = false
+            xrayBtn.Text = "👁️ X-Ray [关闭]"
+            xrayBtn.BackgroundColor3 = Color3.fromRGB(55,55,70)
+            for obj, t in pairs(savedTransparencies) do
+                if obj and obj.Parent then obj.Transparency = t end
+            end
+            savedTransparencies = {}
+        end
+        -- Fog
+        if fogDisabled then
+            fogDisabled = false
+            fogBtn.Text = "🌫️ 雾气 [开启]"
+            fogBtn.BackgroundColor3 = Color3.fromRGB(55,55,70)
+            Lighting.FogEnd = originalFogEnd
+        end
+        -- Brightness
+        Lighting.Brightness = originalBrightness
+        brightBox.Text = tostring(originalBrightness)
+        -- Grayscale
+        if grayscaleEnabled then
+            grayscaleEnabled = false
+            grayBtn.Text = "🖤 灰度 [关闭]"
+            grayBtn.BackgroundColor3 = Color3.fromRGB(55,55,70)
+            for obj, c in pairs(savedColors) do
+                if obj and obj.Parent then obj.Color = c end
+            end
+            savedColors = {}
+        end
+        warn("KING: 环境已重置为默认状态")
+    end)
+    
+    -- 6. 高危
+    local dangerBtn = createButton(scrollFrame, "⚠️ 高危", UDim2.new(1,-20,0,44), nil, Color3.fromRGB(180,40,40))
+    dangerBtn.LayoutOrder = order; order = order + 1
+    
+    local dangerSubContainer = Instance.new("Frame")
+    dangerSubContainer.Size = UDim2.new(1,-20,0,0)
+    dangerSubContainer.BackgroundTransparency = 1
+    dangerSubContainer.ClipsDescendants = true
+    dangerSubContainer.LayoutOrder = order; order = order + 1
+    dangerSubContainer.Parent = scrollFrame
+    
+    local dangerSubList = Instance.new("UIListLayout")
+    dangerSubList.SortOrder = Enum.SortOrder.LayoutOrder
+    dangerSubList.Padding = UDim.new(0,4)
+    dangerSubList.Parent = dangerSubContainer
+    
+    local dangerOpen = false
+    dangerBtn.MouseButton1Click:Connect(function()
+        dangerOpen = not dangerOpen
+        TweenService:Create(dangerSubContainer, TweenInfo.new(0.2), {Size = UDim2.new(1,-20,0, dangerOpen and 300 or 0)}):Play()
+        if dangerOpen then refreshPlayerList() end
+    end)
+    
+    -- 警告文字
+    local warnLabel = createLabel(dangerSubContainer, "⚠️ 高风险！极易封号！", UDim2.new(1,0,0,24), nil, 14, Enum.Font.GothamBold, Color3.fromRGB(255,80,80), Enum.TextXAlignment.Center)
+    warnLabel.LayoutOrder = 1
+    
+    local dangerBackBtn = createButton(dangerSubContainer, "← 返回", UDim2.new(1,0,0,36), nil, Color3.fromRGB(80,80,100))
+    dangerBackBtn.LayoutOrder = 2
+    dangerBackBtn.MouseButton1Click:Connect(function()
+        dangerOpen = false
+        TweenService:Create(dangerSubContainer, TweenInfo.new(0.2), {Size = UDim2.new(1,-20,0,0)}):Play()
+    end)
+    
+    -- 玩家列表容器
+    local playerListFrame = Instance.new("Frame")
+    playerListFrame.Size = UDim2.new(1,0,1,-80)
+    playerListFrame.Position = UDim2.new(0,0,0,60)
+    playerListFrame.BackgroundTransparency = 1
+    playerListFrame.Parent = dangerSubContainer
+    
+    local playerListLayout = Instance.new("UIListLayout")
+    playerListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    playerListLayout.Padding = UDim.new(0,3)
+    playerListLayout.Parent = playerListFrame
+    
+    local selectedTarget = nil
+    
+    function refreshPlayerList()
+        for _, child in pairs(playerListFrame:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
+        selectedTarget = nil
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                local pBtn = createButton(playerListFrame, p.Name, UDim2.new(1,0,0,30), nil, Color3.fromRGB(60,60,80))
+                pBtn.LayoutOrder = _
+                pBtn.MouseButton1Click:Connect(function()
+                    -- 取消之前选中
+                    for _, pb in pairs(playerListFrame:GetChildren()) do
+                        if pb:IsA("TextButton") then pb.BackgroundColor3 = Color3.fromRGB(60,60,80) end
+                    end
+                    pBtn.BackgroundColor3 = Color3.fromRGB(40,180,80)
+                    selectedTarget = p
+                end)
+            end
+        end
+    end
+    
+    -- 甩飞按钮
+    local launchBtn = createButton(dangerSubContainer, "💥 甩飞目标", UDim2.new(1,0,0,36), nil, Color3.fromRGB(200,40,40))
+    launchBtn.LayoutOrder = 99
+    launchBtn.MouseButton1Click:Connect(function()
+        if not selectedTarget or not selectedTarget.Character then
+            warn("KING: 未选择有效目标！")
+            return
+        end
+        local targetChar = selectedTarget.Character
+        local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+        local myChar = LocalPlayer.Character
+        local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        
+        if not targetHRP or not myHRP then
+            warn("KING: 目标或自身HRP不存在！")
+            return
+        end
+        
+        local originalCFrame = myHRP.CFrame
+        myHRP.CFrame = targetHRP.CFrame * CFrame.new(0,0,3)
+        
+        -- 高频碰撞 0.5秒
+        local startTime = tick()
+        local conn
+        conn = RunService.Heartbeat:Connect(function()
+            if tick() - startTime > 0.5 or not targetHRP or not targetHRP.Parent then
+                conn:Disconnect()
+                if myHRP and myHRP.Parent then
+                    myHRP.CFrame = originalCFrame
+                end
+                warn("KING: 甩飞完成，已返回原位")
+                return
+            end
+            if myHRP and myHRP.Parent and targetHRP and targetHRP.Parent then
+                myHRP.CFrame = targetHRP.CFrame * CFrame.new(math.random(-1,1)*0.1, math.random(-1,1)*0.1, math.random(-1,1)*0.1)
+            end
+        end)
+    end)
+    
+    -- 7. 敬请期待
+    local soonBtn = createButton(scrollFrame, "✨ 敬请期待", UDim2.new(1,-20,0,44), nil, Color3.fromRGB(80,70,100))
+    soonBtn.LayoutOrder = order; order = order + 1
+    soonBtn.TextColor3 = Color3.fromRGB(180,180,200)
+    soonBtn.Font = Enum.Font.GothamItalic
+    soonBtn.MouseButton1Click:Connect(function()
+        warn("KING: 新功能开发中，敬请期待！")
+    end)
+    
+    -- ===== 拖动主面板 =====
+    makeDraggable(mainPanel)
+    
+    -- ===== K 按钮（左下角）=====
+    local kButton = createFrame(gui, UDim2.new(0,40,0,40), UDim2.new(0,20,1,-60), Color3.fromRGB(50,50,70), 0, 20)
+    kButton.ZIndex = 100
+    local kLabel = createLabel(kButton, "K", UDim2.new(1,0,1,0), UDim2.new(0,0,0,0), 20, Enum.Font.GothamBlack, Color3.white, Enum.TextXAlignment.Center)
+    
+    local mainVisible = true
+    
+    kButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 
+           or input.UserInputType == Enum.UserInputType.Touch then
+            -- 短按切换显隐（拖动由makeDraggable处理）
+            local startTime = tick()
+            local endedConn
+            endedConn = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    endedConn:Disconnect()
+                    if tick() - startTime < 0.3 then
+                        mainVisible = not mainVisible
+                        mainPanel.Visible = mainVisible
+                    end
+                end
+            end)
+        end
+    end)
+    
+    makeDraggable(kButton)
+    
+    -- ===== 入场动画 =====
+    mainPanel.Visible = true
+    mainPanel.Size = UDim2.new(0,0,0,0)
+    mainPanel.BackgroundTransparency = 1
+    kButton.BackgroundTransparency = 1
+    
+    TweenService:Create(mainPanel, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0,240,0,400),
+        BackgroundTransparency = 0
+    }):Play()
+    
+    wait(0.3)
+    TweenService:Create(kButton, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 0
+    }):Play()
+    
+    -- ===== 核心循环 =====
+    spawn(function()
+        while gui and gui.Parent do
+            wait(0.05)
+            
+            -- ESP
+            if espEnabled then
+                local cam = workspace.CurrentCamera
+                for _, p in pairs(Players:GetPlayers()) do
+                    if p ~= LocalPlayer and p.Character then
+                        local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                        if hrp then
+                            local screenPos, onScreen = cam:WorldToScreenPoint(hrp.Position)
+                            if onScreen then
+                                if not espMarkers[p.UserId] then
+                                    local marker = Instance.new("Frame")
+                                    marker.Size = UDim2.new(0,6,0,6)
+                                    marker.BackgroundColor3 = Color3.fromRGB(0,255,255)
+                                    marker.BorderSizePixel = 0
+                                    marker.ZIndex = 50
+                                    marker.Parent = gui
+                                    local mc = Instance.new("UICorner")
+                                    mc.CornerRadius = UDim.new(1,0)
+                                    mc.Parent = marker
+                                    espMarkers[p.UserId] = marker
+                                end
+                                espMarkers[p.UserId].Position = UDim2.new(0, screenPos.X - 3, 0, screenPos.Y - 3)
+                            else
+                                if espMarkers[p.UserId] then
+                                    espMarkers[p.UserId]:Destroy()
+                                    espMarkers[p.UserId] = nil
+                                end
+                            end
+                        end
+                    end
+                end
+                -- 清理离线玩家标记
+                for uid, marker in pairs(espMarkers) do
+                    local found = false
+                    for _, p in pairs(Players:GetPlayers()) do
+                        if p.UserId == uid then found = true; break end
+                    end
+                    if not found then
+                        safeDestroy(marker)
+                        espMarkers[uid] = nil
+                    end
+                end
+            end
+            
+            -- Aim Assist
+            if aimAssistEnabled then
+                local cam = workspace.CurrentCamera
+                local center = Vector2.new(cam.ViewportSize.X/2, cam.ViewportSize.Y/2)
+                local closestDist = 100
+                local closestHRP = nil
+                
+                for _, p in pairs(Players:GetPlayers()) do
+                    if p ~= LocalPlayer and p.Character then
+                        local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                        if hrp then
+                            local sp, onScreen = cam:WorldToScreenPoint(hrp.Position)
+                            if onScreen then
+                                local dist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                                if dist < closestDist then
+                                    closestDist = dist
+                                    closestHRP = hrp
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                if closestHRP then
+                    local lookCF = CFrame.lookAt(cam.CFrame.Position, closestHRP.Position)
+                    cam.CFrame = cam.CFrame:Lerp(lookCF, 0.1)
+                end
+            end
+            
+            -- Fly
+            if flyEnabled then
+                local char = LocalPlayer.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    if rising then
+                        hrp.Velocity = Vector3.new(0, flySpeed, 0)
+                    elseif descending then
+                        hrp.Velocity = Vector3.new(0, -flySpeed, 0)
+                    else
+                        hrp.Velocity = Vector3.new(0, 0, 0)
+                    end
+                end
+            end
+            
+            -- Infinite Jump
+            if infJumpEnabled then
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum and hum.FloorMaterial ~= Enum.Material.Air then
+                    hum.JumpPower = jumpPower
+                    hum.Jump = true
+                end
+            end
+            
+            -- WalkSpeed sync
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.WalkSpeed ~= walkSpeedValue and not flyEnabled then
+                hum.WalkSpeed = walkSpeedValue
+            end
+        end
+    end)
+end
